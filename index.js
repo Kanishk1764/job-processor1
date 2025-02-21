@@ -89,12 +89,44 @@ async function processWorkers(jobId, jobData) {
     return;
   }
 
-  workers.sort((a, b) => a.distance - b.distance); // Sort workers by distance
-
-  // Process workers in parallel (with proper handling of async tasks)
-  const workerProcessingPromises = workers.map(worker => handleWorkerNotification(worker, jobId, jobData));
-
-  await Promise.all(workerProcessingPromises); // Run all notifications for workers in parallel
+  // Sort workers by distance
+  workers.sort((a, b) => a.distance - b.distance);
+  
+  // Process workers in batches of 10
+  const BATCH_SIZE = 10;
+  let currentBatch = 0;
+  let jobAssigned = false;
+  
+  while (currentBatch * BATCH_SIZE < workers.length && !jobAssigned) {
+    const startIdx = currentBatch * BATCH_SIZE;
+    const endIdx = Math.min(startIdx + BATCH_SIZE, workers.length);
+    const workerBatch = workers.slice(startIdx, endIdx);
+    
+    console.log(`Processing batch ${currentBatch + 1} (workers ${startIdx + 1}-${endIdx})`);
+    
+    // Track job assignment status within this batch
+    const batchResults = await Promise.all(
+      workerBatch.map(async (worker) => {
+        const result = await handleWorkerNotification(worker, jobId, jobData);
+        return { worker, accepted: result };
+      })
+    );
+    
+    // Check if any worker in this batch accepted the job
+    const acceptedWorker = batchResults.find(result => result.accepted);
+    if (acceptedWorker) {
+      jobAssigned = true;
+      console.log(`Job assigned to worker ${acceptedWorker.worker.uid} in batch ${currentBatch + 1}`);
+    } else {
+      console.log(`No workers in batch ${currentBatch + 1} accepted the job. Moving to next batch.`);
+      currentBatch++;
+    }
+  }
+  
+  if (!jobAssigned) {
+    console.log(`No workers accepted job ${jobId} after trying all ${workers.length} available workers.`);
+    await db.ref(`${JOBS_REF}/${jobId}`).update({ status: 'unassigned' });
+  }
 }
 
 /**
@@ -107,9 +139,11 @@ async function handleWorkerNotification(worker, jobId, jobData) {
 
   if (accepted) {
     await assignJobToWorker(worker, jobId);
+    return true;
   } else {
     console.log(`Worker ${worker.uid} declined the job.`);
     await db.ref(`${WORKERS_REF}/${worker.uid}/jobNotification`).remove();
+    return false;
   }
 }
 
